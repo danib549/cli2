@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-py"
+version = "0.2.0"
+description = "A local-first coding agent CLI with chat interface"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "tomli>=2.0.0;python_version<'3.11'",
+    "pyreadline3>=3.4.0;sys_platform=='win32'",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.18.0"]
+openai = ["openai>=1.0.0"]
+all = [
+    "anthropic>=0.18.0",
+    "openai>=1.0.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+opencode = "opencode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
