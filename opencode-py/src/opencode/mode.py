@@ -5,9 +5,16 @@ from typing import Callable
 
 
 class Mode(Enum):
-    """Operating mode for the agent."""
+    """Operating mode for the agent.
+
+    Modes:
+    - PLAN: Read-only exploration for planning
+    - BUILD: Full execution mode with write/shell capabilities
+    - REVIEW: Deep code analysis mode for architectural review
+    """
     PLAN = "plan"
     BUILD = "build"
+    REVIEW = "review"
 
 
 class ExecutionMode(Enum):
@@ -46,6 +53,16 @@ class ModeManager:
         """Check if in BUILD mode."""
         return self._mode == Mode.BUILD
 
+    @property
+    def is_review(self) -> bool:
+        """Check if in REVIEW mode."""
+        return self._mode == Mode.REVIEW
+
+    @property
+    def is_read_only(self) -> bool:
+        """Check if in a read-only mode (PLAN or REVIEW)."""
+        return self._mode in (Mode.PLAN, Mode.REVIEW)
+
     def set_mode(self, mode: Mode) -> None:
         """Switch to a new operating mode."""
         old_mode = self._mode
@@ -61,6 +78,10 @@ class ModeManager:
     def to_build(self) -> None:
         """Switch to BUILD mode."""
         self.set_mode(Mode.BUILD)
+
+    def to_review(self) -> None:
+        """Switch to REVIEW mode."""
+        self.set_mode(Mode.REVIEW)
 
     def on_mode_change(self, callback: Callable[[Mode], None]) -> None:
         """Register a listener for mode changes."""
@@ -119,6 +140,6 @@ class ModeManager:
 
     def status_short(self) -> str:
         """Get short status for prompt."""
-        mode_char = "P" if self.is_plan else "B"
+        mode_char = {"plan": "P", "build": "B", "review": "R"}[self._mode.value]
         exec_char = "A" if self.is_auto else "I"
         return f"{mode_char}/{exec_char}"
