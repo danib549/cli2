@@ -183,7 +183,7 @@ class Plan:
         if not self.confirmed:
             lines.append(f"├{'─' * (width - 2)}┤")
             lines.append(f"│ {'Commands:':<{inner_width}} │")
-            lines.append(f"│ {'  build   - Execute this plan':<{inner_width}} │")
+            lines.append(f"│ {'  yes/build - Execute this plan':<{inner_width}} │")
             lines.append(f"│ {'  revise <feedback> - Ask AI to modify plan':<{inner_width}} │")
             lines.append(f"│ {'  add/edit/remove <N> - Manual edits':<{inner_width}} │")
             lines.append(f"│ {'  cancel  - Discard this plan':<{inner_width}} │")

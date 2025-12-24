@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+import platform
+import shutil
 
 # Cross-platform readline support
 try:
@@ -51,6 +53,106 @@ def _enable_windows_ansi():
 
 # Enable ANSI colors on Windows
 _enable_windows_ansi()
+
+
+def _detect_system_info() -> dict:
+    """Detect OS, distro, and package manager for system context.
+
+    Returns a dict with:
+    - os: Operating system name (Linux, Darwin, Windows)
+    - distro: Distribution name (e.g., Fedora, Ubuntu, macOS)
+    - package_manager: Recommended package manager command
+    - install_command: Full install command template
+    """
+    info = {
+        "os": platform.system(),
+        "distro": "Unknown",
+        "package_manager": None,
+        "install_command": None,
+    }
+
+    if info["os"] == "Darwin":
+        info["distro"] = "macOS"
+        info["package_manager"] = "brew"
+        info["install_command"] = "brew install {package}"
+
+    elif info["os"] == "Windows":
+        info["distro"] = "Windows"
+        # Check for common Windows package managers using shutil.which()
+        # Priority: winget (built-in on Win11+), choco (popular), scoop (dev-friendly)
+        for pm, cmd in [("winget", "winget install {package}"),
+                        ("choco", "choco install {package}"),
+                        ("scoop", "scoop install {package}")]:
+            if shutil.which(pm):
+                info["package_manager"] = pm
+                info["install_command"] = cmd
+                break
+
+    elif info["os"] == "Linux":
+        # Try to detect Linux distribution
+        distro = None
+
+        # Method 1: Check /etc/os-release (most reliable)
+        if os.path.exists("/etc/os-release"):
+            try:
+                with open("/etc/os-release") as f:
+                    for line in f:
+                        if line.startswith("ID="):
+                            distro = line.split("=")[1].strip().strip('"').lower()
+                            break
+            except Exception:
+                pass
+
+        # Method 2: Check kernel version for distro hints
+        if not distro:
+            kernel = platform.release().lower()
+            if "fc" in kernel:  # Fedora
+                distro = "fedora"
+            elif "ubuntu" in kernel:
+                distro = "ubuntu"
+            elif "arch" in kernel:
+                distro = "arch"
+
+        # Set package manager based on distro
+        if distro:
+            info["distro"] = distro.capitalize()
+
+            # Debian/Ubuntu family
+            if distro in ("ubuntu", "debian", "linuxmint", "pop", "elementary", "zorin"):
+                info["package_manager"] = "apt"
+                info["install_command"] = "sudo apt-get update && sudo apt-get install -y {package}"
+
+            # Red Hat/Fedora family
+            elif distro in ("fedora", "rhel", "centos", "rocky", "alma", "oracle"):
+                info["package_manager"] = "dnf"
+                info["install_command"] = "sudo dnf install -y {package}"
+
+            # Older Red Hat
+            elif distro in ("centos", "rhel") and os.path.exists("/usr/bin/yum"):
+                info["package_manager"] = "yum"
+                info["install_command"] = "sudo yum install -y {package}"
+
+            # Arch family
+            elif distro in ("arch", "manjaro", "endeavouros", "garuda"):
+                info["package_manager"] = "pacman"
+                info["install_command"] = "sudo pacman -S --noconfirm {package}"
+
+            # SUSE family
+            elif distro in ("opensuse", "suse", "opensuse-leap", "opensuse-tumbleweed"):
+                info["package_manager"] = "zypper"
+                info["install_command"] = "sudo zypper install -y {package}"
+
+            # Alpine
+            elif distro == "alpine":
+                info["package_manager"] = "apk"
+                info["install_command"] = "sudo apk add {package}"
+
+            # Gentoo
+            elif distro == "gentoo":
+                info["package_manager"] = "emerge"
+                info["install_command"] = "sudo emerge {package}"
+
+    return info
 
 
 class StatusBar:
@@ -198,8 +300,36 @@ SYSTEM_PROMPT = """You are OpenCode, a local-first coding agent.
 - Mode: {mode}
 - Working directory: {cwd}
 - Workspace: {workspace_status}
+- System: {system_info}
 
-# Tools
+# Available Tools
+
+## Exploration (Use FIRST before any modifications)
+- `tree(path, depth)` - View directory structure
+- `glob(pattern)` - Find files by pattern (e.g., "**/*.py", "src/**/*.ts")
+- `grep(pattern, path)` - Search file contents with regex
+- `read(path)` - Read file contents (supports: text, code, Excel, Word, PDF, CSV, XML)
+- `outline(path)` - Show code structure (classes, functions, etc.)
+- `find_symbols(pattern)` - Find symbols matching pattern
+- `find_definition(symbol)` - Find where a symbol is defined
+- `find_references(symbol)` - Find all usages of a symbol
+
+## Modification (Only after exploration)
+- `edit(path, old, new)` - Replace text in a file (must read file first)
+- `write(path, content)` - Create or overwrite a file
+- `rename_symbol(old, new, language)` - Rename symbol across files
+- `bash(command)` - Execute shell commands
+
+# CRITICAL: Explore First
+
+Before ANY modification, you MUST:
+1. Use `tree`, `glob`, or `grep` to understand project structure
+2. Use `read` to examine relevant files
+3. Use `outline` or `find_symbols` to understand code organization
+4. Only THEN proceed with edits
+
+Never edit a file you haven't read. Never assume file locations - search first.
+
 {tools}
 
 {mode_instructions}
@@ -446,7 +576,7 @@ EXPLORATION SEQUENCE (FOLLOW THIS):
 - `outline(path)` - File structure: `outline("src/auth.py")`
 
 ### Read & Write (REQUIRES EXPLORATION FIRST)
-- `read(path)` - Read file content - MANDATORY before edit
+- `read(path)` - Read file content (text, code, Excel, Word, PDF, CSV, XML) - MANDATORY before edit
 - `write(path, content)` - Create or overwrite file (BLOCKED until exploration done)
 - `edit(path, old, new)` - Replace specific text (BLOCKED until you've read the file)
 
@@ -509,16 +639,85 @@ tree("src") → outline("src/main.py") → find_references("handle_request")
 | Find | `grep`, `glob`, `find_symbols` |
 | Run/Test | `bash` |
 
-## Error Recovery
+## CRITICAL: MANDATORY TOOL USAGE
 
-When a command fails, don't just report - try to fix it:
+================================================================================
+                         YOU MUST USE TOOLS - NO EXCEPTIONS
+================================================================================
 
-1. **Missing module**: `bash("pip install X")` then retry
-2. **File not found**: Use glob/grep to find correct path
-3. **Permission denied**: Suggest fix or try alternative
-4. **Syntax error**: Fix and retry immediately
+You are an EXECUTION agent, not a chatbot. Your primary function is to USE TOOLS
+to accomplish tasks. Text responses without tool calls are almost always WRONG.
 
-Don't give up after one failure. Be resourceful.
+### THE RULE
+If a task can be accomplished with a tool, YOU MUST CALL THAT TOOL.
+DO NOT describe what you would do. DO NOT ask if you should do it. JUST DO IT.
+
+### FORBIDDEN BEHAVIORS
+- "I would run..." - NO. Run it.
+- "You could try..." - NO. Try it yourself.
+- "Let me suggest..." - NO. Execute the suggestion.
+- "Would you like me to..." - NO. Just do it.
+- "I can help you by..." - NO. Help by doing, not talking.
+- Asking which tool/command/approach to use when context makes it obvious
+
+### REQUIRED BEHAVIORS
+- See an error? USE A TOOL to fix it immediately
+- Need information? USE A TOOL to get it (glob, grep, read, bash)
+- User asks to install something? USE bash() to install it
+- User asks to fix something? USE edit() to fix it
+- Something fails? USE TOOLS to try alternatives
+
+### AUTONOMY LEVEL
+You have permission to:
+- Run any command needed to complete the task
+- Install packages using the system package manager
+- Create, edit, delete files as needed
+- Chain multiple tool calls to solve problems
+- Try alternative approaches when one fails
+
+You do NOT need permission to:
+- Read files, search code, explore the codebase
+- Run diagnostic commands (ls, cat, grep, etc.)
+- Install missing dependencies
+- Fix obvious errors
+
+## Error Recovery (AUTO-FIX, NO QUESTIONS)
+
+When a command fails, IMMEDIATELY use tools to fix it:
+
+### Package Manager Errors
+If a package manager command fails with "command not found":
+1. Check the System info in the Environment section
+2. Call bash() with the correct package manager:
+   - Fedora/RHEL/CentOS: `sudo dnf install -y {package}`
+   - Debian/Ubuntu: `sudo apt-get install -y {package}`
+   - Arch/Manjaro: `sudo pacman -S --noconfirm {package}`
+   - macOS: `brew install {package}`
+   - Alpine: `sudo apk add {package}`
+   - openSUSE: `sudo zypper install -y {package}`
+   - Windows: `winget install {package}` or `choco install {package}`
+
+Example: `apt-get` fails on Fedora? IMMEDIATELY call:
+```
+bash("sudo dnf install -y gcc")
+```
+DO NOT ask "which package manager should I use?" - the System info tells you.
+
+### Other Errors - AUTO-FIX PROTOCOL
+| Error | Action (USE TOOL IMMEDIATELY) |
+|-------|-------------------------------|
+| Missing module | `bash("pip install X")` then retry |
+| File not found | `glob()` or `grep()` to find it, then proceed |
+| Permission denied | Retry with `sudo` via `bash()` |
+| Command not found | Install the package via `bash()`, then retry |
+| Syntax error | `edit()` to fix, then retry |
+| Wrong path | `glob()` to find correct path, then use it |
+
+### Recovery Loop
+1. Error occurs
+2. IMMEDIATELY call a tool to attempt fix (no text response first)
+3. If fix fails, try next alternative (up to 3 attempts)
+4. Only ask user after 3 failed attempts with different approaches
 
 ## Fix Similar Errors
 
@@ -744,6 +943,7 @@ class OpenCodeREPL:
             return AnthropicProvider(
                 api_key=self.config.api_key,
                 model=self.config.llm_model,
+                debug=self.config.debug,
             )
 
         elif provider == "openai":
@@ -753,6 +953,7 @@ class OpenCodeREPL:
                 api_key=self.config.api_key,
                 model=self.config.llm_model,
                 base_url=self.config.base_url or None,
+                debug=self.config.debug,
             )
 
         elif provider == "custom":
@@ -762,6 +963,7 @@ class OpenCodeREPL:
                 base_url=self.config.base_url,
                 model=self.config.llm_model,
                 api_key=self.config.api_key or "not-needed",
+                debug=self.config.debug,
             )
 
         return None
@@ -812,10 +1014,18 @@ class OpenCodeREPL:
         # Load project instructions from iai.md
         project_instructions = self._load_project_instructions()
 
+        # Detect system info for package manager context
+        sys_info = _detect_system_info()
+        if sys_info["package_manager"]:
+            system_info = f"{sys_info['distro']} ({sys_info['os']}) - use `{sys_info['package_manager']}` for packages"
+        else:
+            system_info = f"{sys_info['distro']} ({sys_info['os']})"
+
         return SYSTEM_PROMPT.format(
             mode=self.mode_manager.mode.value.upper(),
             cwd=Path.cwd(),
             workspace_status=workspace_status,
+            system_info=system_info,
             tools=self.registry.get_tool_descriptions(),
             mode_instructions=mode_instructions,
             plan_instructions=plan_instructions,
@@ -1095,8 +1305,8 @@ The following instructions are specific to this project. Follow them carefully:
         parts = user_input.strip().split(maxsplit=2)
         cmd = parts[0].lower() if parts else ""
 
-        # build - confirm and execute
-        if cmd == "build":
+        # build / yes / confirm - confirm and execute
+        if cmd in ("build", "yes", "y", "ok", "okay", "confirm", "proceed", "go", "execute", "run"):
             self._confirm_and_execute_plan()
             return True
 
@@ -1664,7 +1874,7 @@ Workspace:
 
 Mode:
   /plan              Switch to PLAN mode (read-only analysis)
-  /build             Switch to BUILD mode (execution) or confirm plan
+  /build or yes      Switch to BUILD mode (execution) or confirm plan
   /review [target]   Switch to REVIEW mode (architectural analysis)
   /review all        Full project analysis with graphs, flows, protocols
   /review phases     Show/edit review phases configuration
@@ -1704,6 +1914,7 @@ Examples:
   ls -la                     Run shell command
   read data.xlsx             Read Excel file
   read report.docx           Read Word document
+  read manual.pdf            Read PDF file
   refactor the auth module   Triggers PLAN mode
   /save my-feature           Save session as "my-feature"
 """)
@@ -1772,7 +1983,7 @@ Tools & File Formats
 ====================
 
 Available Tools:
-  read       Read files (text, code, Excel, Word, CSV)
+  read       Read files (text, code, Excel, Word, PDF, CSV, XML)
   write      Write/create files
   edit       Edit files with find/replace
   bash       Execute shell commands
@@ -1817,6 +2028,8 @@ Examples:
   read("src/main.py")              Read Python file
   read("data.xlsx", sheet="Q4")    Read specific Excel sheet
   read("report.docx")              Read Word document
+  read("manual.pdf")               Read PDF document
+  read("config.xml")               Read XML file
   read("large.py", lines="1-50")   Read specific lines
   read("big.py", full=True)        Read entire large file
 """)
@@ -1977,249 +2190,110 @@ Provide a detailed report suitable for a senior architect."""
         phases_path.parent.mkdir(parents=True, exist_ok=True)
 
         content = '''# OpenCode Review Phases Configuration
+# Fully dynamic - works with ANY project type or language
 # Edit these phases to customize /review all output
-# Each [[phases]] block defines one review phase
-#
-# IMPORTANT: Prompts should be DIRECTIVE - they must force the LLM to:
-# 1. Execute tools immediately (not plan)
-# 2. Provide concrete output with file:line references
-# 3. Not just describe what it will do
-
-# Tool instructions are NOT appended automatically anymore
-# Include explicit tool commands in each phase prompt
 
 [[phases]]
-name = "Project Mapping"
-prompt = """EXECUTE NOW - Do not plan, do not describe what you will do. Start using tools immediately.
+name = "Project Discovery"
+prompt = """EXECUTE IMMEDIATELY. No planning. Run tools NOW.
 
-STEP 1: Run `tree(".", depth=3)` to see COMPLETE directory structure
-STEP 2: Run `glob("**/*")` to find ALL files (source, docs, config, data, etc.)
-STEP 3: Categorize ALL files by type:
-   - Source code: .py, .js, .ts, .c, .cpp, .h, .go, .rs, .java, .rb, .php, etc.
-   - Documentation: .md, .rst, .txt, README, CHANGELOG, etc.
-   - Config: .json, .yaml, .yml, .toml, .ini, .env, .xml, etc.
-   - Data: .csv, .sql, .db, etc.
-   - Build: Makefile, CMakeLists.txt, package.json, Cargo.toml, etc.
-STEP 4: For source files, run `grep` to find imports/includes
+1. Run `tree(".")` to see the complete project structure
+2. Run `glob("**/*")` to list every file
+3. Read any README, docs, or config files to understand the project
 
-After running the tools, provide:
+DISCOVER AND REPORT:
+- What type of project is this?
+- What languages/technologies are used?
+- What is the directory structure?
+- What are the main entry points?
+- What external dependencies exist?
 
-1. **File Structure Summary**
-   - List all directories and their purposes
-   - ALL file types found (not just source code)
-   - Identify entry points (files with main(), CLI commands, etc.)
-
-2. **Dependency Graph** (ASCII art)
-   Show which modules import which:
-   ```
-   module_a --> module_b --> module_c
-   ```
-
-3. **External Dependencies**
-   - List all external packages/libraries used
-   - Note any circular dependencies
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+Create an ASCII dependency graph.
+Keep exploring until you understand the project. Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Data & Control Flow"
-prompt = """EXECUTE NOW - Use tools immediately to trace data flow.
+name = "Code Structure"
+prompt = """EXECUTE IMMEDIATELY. Analyze all source code files.
 
-STEP 1: Run `grep("(def |function |class )")` to find all functions/classes
-STEP 2: Run `grep("(input|stdin|argv|request|read)")` to find input sources
-STEP 3: Run `grep("(print|write|send|response|output)")` to find output sinks
-STEP 4: Read the main entry point file(s) to understand control flow
+1. Run `glob("**/*")` and identify all source code files
+2. For each source file, run `outline(path)` to see structure
+3. Use `grep` to find how files import/include each other
+4. Read key files to understand their purpose
 
-After running tools, provide:
+FOR EACH SOURCE FILE, report:
+- Purpose, key functions/structures, dependencies
 
-1. **Input Sources** (with file:line references)
-   - CLI arguments, Environment variables, File reads, Network/API inputs
-
-2. **Output Sinks** (with file:line references)
-   - STDOUT/STDERR, File writes, Network sends, Database writes
-
-3. **Control Flow Diagram** (ASCII)
-
-4. **Error Handling Paths**
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+Create a component diagram. Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Protocols & Interfaces"
-prompt = """EXECUTE NOW - Search for protocols and interfaces.
+name = "Data Flow"
+prompt = """EXECUTE IMMEDIATELY. Trace how data moves through the system.
 
-STEP 1: Run `grep("(http|socket|grpc|websocket|api)", "-i")` for external protocols
-STEP 2: Run `grep("(class |interface |abstract |protocol )")` for internal interfaces
-STEP 3: Run `grep("(json|yaml|toml|xml|serialize)")` for serialization
-STEP 4: Read files that define public APIs
+1. Use `grep` to find where data ENTERS (input, read, stdin, argv, request, etc.)
+2. Use `grep` to find where data EXITS (print, write, output, send, etc.)
+3. Read entry point files to trace execution flow
 
-After running tools, provide:
-
-1. **External Protocols** (with file:line)
-2. **Internal Interfaces** (with file:line)
-3. **Data Formats**
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+REPORT: Input sources, output destinations, data flow diagram, error handling.
+Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "State Management"
-prompt = """EXECUTE NOW - Find all state in the application.
+name = "Interfaces & APIs"
+prompt = """EXECUTE IMMEDIATELY. Find all interfaces and APIs.
 
-STEP 1: Run `grep("(global |static |self\\\\.|this\\\\.|_[a-z]+ =)")` for state variables
-STEP 2: Run `grep("(cache|session|state|context|singleton)")` for state patterns
-STEP 3: Read files with significant state management
+Use `grep` to find function/method definitions, class/struct definitions,
+public exports, HTTP routes, config schemas.
 
-After running tools, provide:
-
-1. **Global State** (with file:line)
-2. **Instance State** (with file:line)
-3. **State Transitions**
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+REPORT: Public API surface, internal interfaces, data structures, protocols.
+Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Security Analysis"
-prompt = """EXECUTE NOW - Perform security audit.
+name = "State & Storage"
+prompt = """EXECUTE IMMEDIATELY. Find all state and data storage.
 
-STEP 1: Run `grep("(password|secret|key|token|credential)", "-i")` for secrets
-STEP 2: Run `grep("(exec|eval|system|shell|subprocess)")` for command injection risks
-STEP 3: Run `grep("(sql|query|execute.*\\\\()")` for SQL injection risks
-STEP 4: Run `grep("(\\\\.\\\\./|path.*join|open\\\\()")` for path traversal risks
-STEP 5: Read files that handle user input or authentication
+Use `grep` for global/static variables, caches, sessions, database operations.
 
-After running tools, provide:
-
-1. **Hardcoded Secrets** (CRITICAL - with file:line)
-2. **Injection Vulnerabilities** (with file:line)
-3. **Path Traversal Risks** (with file:line)
-4. **Authentication/Authorization**
-5. **Trust Boundaries**
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+REPORT: Global state, instance state, persistent storage, state transitions.
+Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Component Analysis"
-prompt = """EXECUTE NOW - Analyze each major component.
+name = "Security Scan"
+prompt = """EXECUTE IMMEDIATELY. Security audit.
 
-STEP 1: List ALL files with `glob("**/*")` - include source, config, docs, data files
-STEP 2: For each major module/file, run `outline(path)` to see structure
-STEP 3: Run `grep` for imports based on language:
-   - C/C++: `grep("#include")`
-   - Python: `grep("import|from .* import")`
-   - JS/TS: `grep("import|require")`
-STEP 4: Read key files to understand their purpose
+Use `grep` for: password, secret, key, token, exec, eval, system, sql, query, path.
 
-After running tools, for EACH major component provide:
-
-**Component: [name]**
-- **Purpose**: What it does
-- **Files**: Which files (with line counts)
-- **Public API**: Key functions/classes exported
-- **Dependencies**: What it imports
-- **Complexity**: Simple/Medium/Complex
-
-List ALL components found. Do not skip any.
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+REPORT: Hardcoded secrets, injection risks, path traversal, auth issues.
+Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Call Graphs"
-prompt = """EXECUTE NOW - Map function call hierarchies.
+name = "Code Quality"
+prompt = """EXECUTE IMMEDIATELY. Assess code quality.
 
-STEP 1: Find entry points based on language:
-   - C/C++: `grep("int main|void main")`
-   - Python: `grep("def main|if __name__")`
-   - JS/TS: `grep("function main|exports\\\\.")`
-STEP 2: For each entry point, run `outline` then `read` to trace calls
-STEP 3: Run `grep` for each major function to find where it's called
+1. Run `glob("**/*")` to get all files
+2. For major files, run `outline` to count functions
+3. Use `grep` for: TODO, FIXME, HACK, XXX
 
-After running tools, provide:
-
-1. **Entry Points** (with file:line)
-
-2. **Call Tree** (ASCII art for each entry point)
-   ```
-   main() [cli.py:100]
-   +-- parse_args() [cli.py:50]
-   +-- load_config() [config.py:30]
-   +-- run() [core.py:100]
-   ```
-
-3. **Critical Paths**
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+REPORT: Code metrics table, patterns, anti-patterns, technical debt.
+Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Quality Metrics"
-prompt = """EXECUTE NOW - Measure code quality.
+name = "Testing"
+prompt = """EXECUTE IMMEDIATELY. Analyze testing.
 
-STEP 1: List all files with `glob("**/*")` and categorize by type (source, docs, config, data)
-STEP 2: For each major file, run `outline` to count functions/classes
-STEP 3: Run `read` on largest files to assess complexity
-STEP 4: Run `grep("(TODO|FIXME|HACK|XXX)")` for technical debt
+1. Find test files with `glob("**/test*")` or `glob("**/*test*")`
+2. For each test file, run `outline`
+3. Compare against source files
 
-After running tools, provide:
-
-1. **Code Metrics** (table format)
-2. **Design Patterns Found** (with file:line)
-3. **Anti-Patterns/Code Smells**
-4. **Documentation Coverage**
-5. **Technical Debt** (TODO/FIXME count)
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
+REPORT: Test files, coverage map, testing gaps, recommendations.
+Say "PHASE COMPLETE" when done."""
 
 [[phases]]
-name = "Testing Analysis"
-prompt = """EXECUTE NOW - Analyze test coverage.
+name = "Summary"
+prompt = """DO NOT run tools. Synthesize all previous analysis.
 
-STEP 1: Find test files based on language detected earlier:
-   - Python: `glob("**/test*.py")` or `glob("**/*_test.py")`
-   - C/C++: `glob("**/test*.c")` or `glob("**/tests/*.c")`
-   - JS/TS: `glob("**/*.test.{js,ts}")` or `glob("**/*.spec.{js,ts}")`
-STEP 2: Run `glob("**/tests/**")` or `glob("**/test/**")` for test directories
-STEP 3: For each test file, run `outline` to see what's tested
-STEP 4: Compare against source files to find gaps
-
-After running tools, provide:
-
-1. **Test Files Found**
-2. **Coverage Map** (table: Source Module | Test File | Coverage)
-3. **Testing Gaps** (CRITICAL)
-4. **Test Quality**
-5. **Recommended Tests**
-
-START EXECUTING TOOLS NOW. Keep running tools until thorough.
-When finished, say "PHASE COMPLETE" and provide findings."""
-
-[[phases]]
-name = "Executive Summary"
-prompt = """Based on all the analysis done in previous phases, synthesize your findings.
-
-DO NOT run tools for this phase. Instead, provide a comprehensive summary:
-
-## Architecture Overview
-One paragraph describing the overall system architecture.
-
-## Key Components
-List the 3-5 most important components and their roles.
-
+## Project Overview
+## Architecture
 ## Strengths
-- What the codebase does well
-
-## Weaknesses
-- Areas needing improvement
-
-## Security Findings
-- Critical issues (if any)
-
+## Issues Found (with file:line)
 ## Risk Assessment
 | Risk | Severity | Location | Recommendation |
 |------|----------|----------|----------------|
@@ -2263,328 +2337,193 @@ Be specific and actionable. Reference file:line where relevant."""
                 return [(name, f"{prompt}\n{tool_instructions}") for name, prompt in user_phases]
             return user_phases
 
-        # Default phases - CRITICAL: These prompts must force EXECUTION, not planning
-        # The LLM must use tools immediately and provide concrete output
+        # Default phases - FULLY DYNAMIC, no language assumptions
+        # The LLM discovers what's in the project and adapts
 
         return [
-            ("Project Mapping", """EXECUTE NOW - Do not plan, do not describe what you will do. Start using tools immediately.
-
-STEP 1: Run `tree(".", depth=3)` to see COMPLETE directory structure
-STEP 2: Run `glob("**/*")` to find ALL files (source, docs, config, data, etc.)
-STEP 3: Categorize ALL files by type:
-   - Source code: .py, .js, .ts, .c, .cpp, .h, .go, .rs, .java, .rb, .php, etc.
-   - Documentation: .md, .rst, .txt, README, CHANGELOG, etc.
-   - Config: .json, .yaml, .yml, .toml, .ini, .env, .xml, etc.
-   - Data: .csv, .sql, .db, etc.
-   - Build: Makefile, CMakeLists.txt, package.json, Cargo.toml, etc.
-STEP 4: For source files, run `grep` to find imports/includes
-
-After running the tools, provide:
-
-1. **File Structure Summary**
-   - List all directories and their purposes
-   - ALL file types found (not just source code)
-   - Identify entry points (files with main(), CLI commands, etc.)
-
-2. **Dependency Graph** (ASCII art)
-   Show which modules import which:
-   ```
-   module_a --> module_b --> module_c
-   ```
-
-3. **External Dependencies**
-   - List all external packages/libraries used
-   - Note any circular dependencies
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Data & Control Flow", """EXECUTE NOW - Use tools immediately to trace data flow.
-
-STEP 1: Run `grep("(def |function |class )")` to find all functions/classes
-STEP 2: Run `grep("(input|stdin|argv|request|read)")` to find input sources
-STEP 3: Run `grep("(print|write|send|response|output)")` to find output sinks
-STEP 4: Read the main entry point file(s) to understand control flow
-
-After running tools, provide:
+            ("Project Discovery", """EXECUTE IMMEDIATELY. No planning, no descriptions. Run tools NOW.
+
+1. Run `tree(".")` to see the complete project structure
+2. Run `glob("**/*")` to list every file
+3. Read any README, docs, or config files to understand the project
+
+DISCOVER AND REPORT:
+- What type of project is this? (library, CLI, web app, API, scripts, etc.)
+- What languages/technologies are used? (look at file extensions)
+- What is the directory structure and purpose of each folder?
+- What are the main entry points?
+- What external dependencies exist? (look for package managers, imports, includes)
+
+Create an ASCII dependency graph showing how modules relate.
+
+Keep exploring until you understand the project. Say "PHASE COMPLETE" when done."""),
+
+            ("Code Structure", """EXECUTE IMMEDIATELY. Analyze all source code files.
+
+1. Run `glob("**/*")` and identify all source code files (any language)
+2. For each source file, run `outline(path)` to see functions/classes/structures
+3. Use `grep` to find how files import/include each other
+4. Read key files to understand their purpose
+
+FOR EACH SOURCE FILE, report:
+- Purpose (what does it do?)
+- Key functions/classes/structures defined
+- What it depends on (imports/includes)
+- What depends on it
+
+Identify the core modules vs utilities vs helpers.
+Create a component diagram showing relationships.
+
+Keep analyzing until complete. Say "PHASE COMPLETE" when done."""),
+
+            ("Data Flow", """EXECUTE IMMEDIATELY. Trace how data moves through the system.
+
+1. Find where data ENTERS the system:
+   - Use `grep` for: input, read, stdin, argv, args, request, recv, fetch, load, parse, open
+2. Find where data EXITS the system:
+   - Use `grep` for: print, write, output, send, response, save, export, return
+3. Read entry point files to trace the main execution flow
+
+REPORT:
+- All input sources (with file:line)
+- All output destinations (with file:line)
+- How data transforms as it flows through
+- ASCII diagram of the main data flow
+- Error handling: where are errors caught/handled?
+
+Keep tracing until complete. Say "PHASE COMPLETE" when done."""),
+
+            ("Interfaces & APIs", """EXECUTE IMMEDIATELY. Find all interfaces and APIs.
+
+1. Use `grep` to find:
+   - Function/method definitions (signatures)
+   - Class/struct/type definitions
+   - Public exports or APIs
+   - HTTP routes, endpoints, handlers
+   - Config files and their schemas
+2. Read interface files or headers
+
+REPORT:
+- Public API surface (what can external code call?)
+- Internal interfaces between modules
+- Data structures and types used
+- Config file formats
+- Network protocols (if any)
+- File formats read/written
+
+Keep searching until complete. Say "PHASE COMPLETE" when done."""),
+
+            ("State & Storage", """EXECUTE IMMEDIATELY. Find all state and data storage.
+
+1. Use `grep` to find:
+   - Global/static variables
+   - Class/instance attributes
+   - Caches, sessions, contexts
+   - Database operations
+   - File read/write operations
+2. Read files that manage state
+
+REPORT:
+- Global state (with file:line)
+- Instance/object state
+- Persistent storage (files, databases)
+- Caches and temporary state
+- State transitions (what changes state?)
+
+Keep analyzing until complete. Say "PHASE COMPLETE" when done."""),
+
+            ("Security Scan", """EXECUTE IMMEDIATELY. Security audit.
+
+1. Use `grep` to find potential issues:
+   - Secrets: password, secret, key, token, credential, api_key
+   - Dangerous functions: exec, eval, system, shell, popen, subprocess
+   - SQL: query, execute, cursor, SELECT, INSERT, UPDATE, DELETE
+   - File paths: open, read, write, path, join, ../, file
+   - Network: http, socket, request, fetch, url
+2. Read files that handle user input or authentication
+
+REPORT:
+- Hardcoded secrets (CRITICAL - file:line)
+- Command injection risks (file:line)
+- SQL injection risks (file:line)
+- Path traversal risks (file:line)
+- Input validation gaps
+- Authentication/authorization issues
+- Trust boundaries
 
-1. **Input Sources** (with file:line references)
-   - CLI arguments
-   - Environment variables
-   - File reads
-   - Network/API inputs
-   - User prompts
-
-2. **Output Sinks** (with file:line references)
-   - STDOUT/STDERR
-   - File writes
-   - Network sends
-   - Database writes
+Keep scanning until complete. Say "PHASE COMPLETE" when done."""),
 
-3. **Control Flow Diagram** (ASCII)
-   ```
-   main() --> parse_args() --> run_command() --> output()
-   ```
-
-4. **Error Handling Paths**
-   - How errors propagate
-   - Where exceptions are caught
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Protocols & Interfaces", """EXECUTE NOW - Search for protocols and interfaces.
-
-STEP 1: Run `grep("(http|socket|grpc|websocket|api)", "-i")` for external protocols
-STEP 2: Run `grep("(class |interface |abstract |protocol )")` for internal interfaces
-STEP 3: Run `grep("(json|yaml|toml|xml|serialize)")` for serialization
-STEP 4: Read files that define public APIs
-
-After running tools, provide:
-
-1. **External Protocols** (with file:line)
-   - HTTP/REST endpoints
-   - WebSocket connections
-   - Database connections
-   - Message queues
+            ("Code Quality", """EXECUTE IMMEDIATELY. Assess code quality.
 
-2. **Internal Interfaces** (with file:line)
-   - Abstract base classes
-   - Interface definitions
-   - Function signatures of public APIs
-
-3. **Data Formats**
-   - JSON schemas used
-   - Config file formats
-   - Binary protocols
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("State Management", """EXECUTE NOW - Find all state in the application.
-
-STEP 1: Run `grep("(global |static |self\\.|this\\.|_[a-z]+ =)")` for state variables
-STEP 2: Run `grep("(cache|session|state|context|singleton)")` for state patterns
-STEP 3: Read files with significant state management
-
-After running tools, provide:
-
-1. **Global State** (with file:line)
-   - Module-level variables
-   - Singletons
-   - Caches
-
-2. **Instance State** (with file:line)
-   - Class attributes
-   - Session objects
-   - Context managers
-
-3. **State Transitions**
-   - What triggers state changes
-   - State machine patterns (if any)
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Security Analysis", """EXECUTE NOW - Perform security audit.
+1. Run `glob("**/*")` to get all files
+2. For major source files, run `outline` to count functions/structures
+3. Use `read` on largest/most complex files
+4. Use `grep` for: TODO, FIXME, HACK, XXX, BUG, WARN
 
-STEP 1: Run `grep("(password|secret|key|token|credential)", "-i")` for secrets
-STEP 2: Run `grep("(exec|eval|system|shell|subprocess)")` for command injection risks
-STEP 3: Run `grep("(sql|query|execute.*\\()")` for SQL injection risks
-STEP 4: Run `grep("(\\.\\./|path.*join|open\\()")` for path traversal risks
-STEP 5: Read files that handle user input or authentication
-
-After running tools, provide:
-
-1. **Hardcoded Secrets** (CRITICAL - with file:line)
-   - API keys, passwords, tokens in code
-
-2. **Injection Vulnerabilities** (with file:line)
-   - Command injection risks
-   - SQL injection risks
-   - XSS risks
-
-3. **Path Traversal Risks** (with file:line)
-   - Unsafe file path handling
-
-4. **Authentication/Authorization**
-   - How auth is implemented
-   - Any bypass risks
-
-5. **Trust Boundaries**
-   - Where untrusted input enters
-   - Where validation happens
+REPORT:
+| File | Lines | Functions/Methods | Complexity |
+|------|-------|-------------------|------------|
 
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Component Analysis", """EXECUTE NOW - Analyze each major component.
-
-STEP 1: List ALL files with `glob("**/*")` - include source, config, docs, data files
-STEP 2: For each major module/file, run `outline(path)` to see structure
-STEP 3: Run `grep` for imports based on language:
-   - C/C++: `grep("#include")`
-   - Python: `grep("import|from .* import")`
-   - JS/TS: `grep("import|require")`
-   - Go: `grep("import")`
-   - Rust: `grep("use |mod ")`
-STEP 4: Read key files to understand their purpose
-
-After running tools, for EACH major component provide:
-
-**Component: [name]**
-- **Purpose**: What it does
-- **Files**: Which files (with line counts)
-- **Public API**: Key functions/classes exported
-- **Dependencies**: What it imports
-- **Complexity**: Simple/Medium/Complex
-
-List ALL components found. Do not skip any.
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Call Graphs", """EXECUTE NOW - Map function call hierarchies.
-
-STEP 1: Find entry points based on language:
-   - C/C++: `grep("int main|void main")`
-   - Python: `grep("def main|if __name__|@click|@app\\.")`
-   - JS/TS: `grep("function main|exports\\.|module\\.exports")`
-   - Go: `grep("func main")`
-   - Rust: `grep("fn main")`
-STEP 2: For each entry point, run `outline` then `read` to trace calls
-STEP 3: Run `grep` for each major function to find where it's called
+Also report:
+- Design patterns observed
+- Anti-patterns or code smells
+- Documentation coverage (comments, docstrings)
+- Naming conventions used
+- Technical debt (TODOs, FIXMEs)
 
-After running tools, provide:
+Keep measuring until complete. Say "PHASE COMPLETE" when done."""),
 
-1. **Entry Points**
-   List all entry points (with file:line)
+            ("Testing", """EXECUTE IMMEDIATELY. Analyze testing.
 
-2. **Call Tree** (ASCII art for each entry point)
-   ```
-   main() [cli.py:100]
-   ├── parse_args() [cli.py:50]
-   │   └── validate() [utils.py:20]
-   ├── load_config() [config.py:30]
-   └── run() [core.py:100]
-       ├── process() [core.py:150]
-       └── output() [io.py:80]
-   ```
+1. Find test files:
+   - `glob("**/test*")` or `glob("**/*test*")` or `glob("**/*spec*")`
+   - Look in common test directories: tests/, test/, spec/, __tests__/
+2. For each test file, run `outline` to see what's tested
+3. Compare test coverage against source files
 
-3. **Critical Paths**
-   - Most frequently executed paths
-   - Performance-critical sections
+REPORT:
+- Test files found (list all)
+- What is tested vs what is NOT tested
+| Module | Has Tests? | Test File |
+|--------|------------|-----------|
 
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
+- Testing gaps (what needs tests?)
+- Test quality observations
+- Recommended tests to add
 
-            ("Quality Metrics", """EXECUTE NOW - Measure code quality.
+Keep analyzing until complete. Say "PHASE COMPLETE" when done."""),
 
-STEP 1: List all files with `glob("**/*")` and categorize by type (source, docs, config, data)
-STEP 2: For each major file, run `outline` to count functions/classes
-STEP 3: Run `read` on largest files to assess complexity
-STEP 4: Run `grep("(TODO|FIXME|HACK|XXX)")` for technical debt
+            ("Summary", """Based on ALL previous analysis, provide a comprehensive summary.
 
-After running tools, provide:
+DO NOT run more tools. Synthesize what you learned.
 
-1. **Code Metrics**
-   | File | Lines | Functions | Classes | Complexity |
-   |------|-------|-----------|---------|------------|
-   | ... | ... | ... | ... | Low/Med/High |
+## Project Overview
+One paragraph describing what this project is and does.
 
-2. **Design Patterns Found**
-   - Factory, Singleton, Observer, etc.
-   - With file:line references
-
-3. **Anti-Patterns/Code Smells**
-   - God classes
-   - Long methods (>50 lines)
-   - Deep nesting (>4 levels)
-
-4. **Documentation Coverage**
-   - Files with/without docstrings
-   - Type hint usage
-
-5. **Technical Debt**
-   - TODO/FIXME count and locations
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Testing Analysis", """EXECUTE NOW - Analyze test coverage.
-
-STEP 1: Find test files based on language:
-   - Python: `glob("**/test*.py")` or `glob("**/*_test.py")`
-   - C/C++: `glob("**/test*.c")` or `glob("**/tests/*.c")`
-   - JS/TS: `glob("**/*.test.{js,ts}")` or `glob("**/*.spec.{js,ts}")`
-   - Go: `glob("**/*_test.go")`
-   - Rust: look for `#[test]` in `*.rs` files
-STEP 2: Run `glob("**/tests/**")` or `glob("**/test/**")` for test directories
-STEP 3: For each test file, run `outline` to see what's tested
-STEP 4: Compare against source files to find gaps
-
-After running tools, provide:
-
-1. **Test Files Found**
-   List all test files with their targets
-
-2. **Coverage Map**
-   | Source Module | Test File | Coverage |
-   |---------------|-----------|----------|
-   | ... | ... | Has tests / No tests |
-
-3. **Testing Gaps** (CRITICAL)
-   - Modules without tests
-   - Complex code without tests
-   - Error paths without tests
-
-4. **Test Quality**
-   - Unit vs integration vs e2e
-   - Mocking patterns used
-   - Edge cases covered
-
-5. **Recommended Tests**
-   Specific test cases that should be added
-
-START EXECUTING TOOLS NOW. Keep running tools until you have thorough coverage.
-When finished with this phase, say "PHASE COMPLETE" and provide your findings."""),
-
-            ("Executive Summary", """Based on all the analysis done in previous phases, synthesize your findings.
-
-DO NOT run tools for this phase. Instead, provide a comprehensive summary:
-
-## Architecture Overview
-One paragraph describing the overall system architecture.
-
-## Key Components
-List the 3-5 most important components and their roles.
+## Architecture
+- Key components and how they interact
+- Main technologies used
 
 ## Strengths
 - What the codebase does well
-- Good patterns observed
-- Well-tested areas
 
-## Weaknesses
-- Areas needing improvement
-- Technical debt
+## Issues Found
+- Security concerns (with file:line)
+- Code quality issues
 - Missing tests
-
-## Security Findings
-- Critical issues (if any)
-- Medium/Low risks
+- Technical debt
 
 ## Risk Assessment
-| Risk | Severity | Location | Recommendation |
-|------|----------|----------|----------------|
-| ... | Critical/High/Medium/Low | file:line | Fix by... |
+| Issue | Severity | Location | Recommendation |
+|-------|----------|----------|----------------|
 
-## Prioritized Action Items
-1. **[Critical]** ...
-2. **[High]** ...
-3. **[Medium]** ...
-4. **[Low]** ...
+## Action Items (prioritized)
+1. [CRITICAL] ...
+2. [HIGH] ...
+3. [MEDIUM] ...
+4. [LOW] ...
 
-Be specific and actionable. Reference file:line where relevant."""),
+Be specific with file:line references."""),
         ]
 
     def _run_review_all(self) -> None:
@@ -2906,6 +2845,10 @@ If you've completed this phase, say "PHASE COMPLETE" and provide your final summ
         self.config.debug = not self.config.debug
         status = "enabled" if self.config.debug else "disabled"
         print(f"Debug mode {status}")
+
+        # Sync debug flag to LLM provider
+        if self.llm:
+            self.llm.debug = self.config.debug
 
         if self.config.debug:
             print("  - LLM requests/responses will be logged")

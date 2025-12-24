@@ -1,9 +1,13 @@
-"""Permission gate for tool and shell execution."""
+"""Permission gate for tool and shell execution.
+
+Includes ExplorationGuard integration for enforcing read-before-write.
+"""
 
 from enum import Enum
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Any
 
 from opencode.style import yellow, green, red, cyan, bold
+from opencode.exploration import ExplorationGuard, ExplorationViolation
 
 if TYPE_CHECKING:
     from opencode.config import Config
@@ -29,14 +33,27 @@ class FeedbackProvided(Exception):
         super().__init__(f"User feedback: {feedback}")
 
 
+class ExplorationRequired(Exception):
+    """Raised when modification attempted without sufficient exploration."""
+
+    def __init__(self, violation: ExplorationViolation):
+        self.violation = violation
+        super().__init__(violation.reason)
+
+
 class PermissionGate:
-    """Interactive permission gate for tool and shell calls."""
+    """Interactive permission gate for tool and shell calls.
+
+    Includes ExplorationGuard integration for enforcing exploration
+    before modification (aggressive teacher mode).
+    """
 
     def __init__(
         self,
         default: Permission = Permission.ASK,
         config: "Config" = None,
         auto_mode: bool = False,
+        enforce_exploration: bool = True,
     ):
         """Initialize permission gate.
 
@@ -44,11 +61,14 @@ class PermissionGate:
             default: Default permission level.
             config: Optional config for safe command whitelist.
             auto_mode: If True, allow all without prompting.
+            enforce_exploration: If True, require exploration before writes.
         """
         self._default = default
         self._rules: dict[str, Permission] = {}
         self._config = config
         self._auto_mode = auto_mode
+        self._enforce_exploration = enforce_exploration
+        self._exploration_guard = ExplorationGuard(enabled=enforce_exploration)
 
     @property
     def auto_mode(self) -> bool:
@@ -59,6 +79,53 @@ class PermissionGate:
     def auto_mode(self, value: bool) -> None:
         """Set auto-execution mode."""
         self._auto_mode = value
+
+    @property
+    def exploration_guard(self) -> ExplorationGuard:
+        """Get the exploration guard."""
+        return self._exploration_guard
+
+    @property
+    def enforce_exploration(self) -> bool:
+        """Check if exploration enforcement is enabled."""
+        return self._enforce_exploration
+
+    @enforce_exploration.setter
+    def enforce_exploration(self, value: bool) -> None:
+        """Enable/disable exploration enforcement."""
+        self._enforce_exploration = value
+        self._exploration_guard.enabled = value
+
+    def record_tool_execution(self, tool_name: str, args: dict[str, Any]) -> None:
+        """Record a tool execution for exploration tracking.
+
+        Call this AFTER a tool successfully executes.
+
+        Args:
+            tool_name: Name of the executed tool
+            args: Tool arguments
+        """
+        self._exploration_guard.record_exploration(tool_name, args)
+
+    def check_exploration(self, tool_name: str, args: dict[str, Any]) -> ExplorationViolation:
+        """Check if a modification is allowed based on exploration.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments
+
+        Returns:
+            ExplorationViolation with details
+        """
+        return self._exploration_guard.check_modification(tool_name, args)
+
+    def reset_exploration(self) -> None:
+        """Reset exploration state for a new task."""
+        self._exploration_guard.reset()
+
+    def exploration_status(self) -> str:
+        """Get formatted exploration status."""
+        return self._exploration_guard.format_status()
 
     def set_rule(self, tool_name: str, permission: Permission) -> None:
         """Set a permission rule for a specific tool."""
@@ -137,6 +204,42 @@ class PermissionGate:
             raise FeedbackProvided(feedback_text)
         else:
             raise PermissionDenied(f"Invalid response, denying '{tool_name}'.")
+
+    def check_with_exploration(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        description: str,
+        prompt_fn: Optional[callable] = None
+    ) -> bool:
+        """Check both exploration requirements AND permissions.
+
+        This is the main entry point for tool permission checks.
+        It first checks exploration requirements (for write/edit tools),
+        then checks user permissions.
+
+        Args:
+            tool_name: Name of the tool being called.
+            args: Tool arguments (needed for exploration check).
+            description: Human-readable description for prompting.
+            prompt_fn: Optional function to prompt user.
+
+        Returns:
+            True if permitted.
+
+        Raises:
+            ExplorationRequired: If exploration requirements not met.
+            PermissionDenied: If user denies permission.
+            FeedbackProvided: If user provides feedback.
+        """
+        # First check exploration requirements for modification tools
+        if self._enforce_exploration:
+            violation = self.check_exploration(tool_name, args)
+            if violation.blocked:
+                raise ExplorationRequired(violation)
+
+        # Then check normal permissions
+        return self.check(tool_name, description, prompt_fn)
 
     def check_shell(
         self,

@@ -1,11 +1,105 @@
 """Abstract LLM interface."""
 
 import re
+import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+
+# =============================================================================
+# LLM Error Classes - Structured errors for better debugging
+# =============================================================================
+
+class LLMError(Exception):
+    """Base exception for LLM errors."""
+
+    def __init__(self, message: str, provider: str = "", suggestion: str = ""):
+        self.message = message
+        self.provider = provider
+        self.suggestion = suggestion
+        super().__init__(self.format_message())
+
+    def format_message(self) -> str:
+        parts = [f"[{self.provider}] {self.message}" if self.provider else self.message]
+        if self.suggestion:
+            parts.append(f"\n  Suggestion: {self.suggestion}")
+        return "".join(parts)
+
+
+class APIKeyError(LLMError):
+    """API key is missing or invalid."""
+
+    def __init__(self, provider: str):
+        super().__init__(
+            message="API key not configured",
+            provider=provider,
+            suggestion=f"Set {provider.upper()}_API_KEY environment variable"
+        )
+
+
+class ConnectionError(LLMError):
+    """Failed to connect to the API."""
+
+    def __init__(self, provider: str, details: str = ""):
+        super().__init__(
+            message=f"Connection failed: {details}" if details else "Connection failed",
+            provider=provider,
+            suggestion="Check your internet connection and API endpoint"
+        )
+
+
+class RateLimitError(LLMError):
+    """Rate limit exceeded."""
+
+    def __init__(self, provider: str, retry_after: int = 0):
+        msg = f"Rate limit exceeded"
+        if retry_after:
+            msg += f" (retry after {retry_after}s)"
+        super().__init__(
+            message=msg,
+            provider=provider,
+            suggestion="Wait a moment and try again, or reduce request frequency"
+        )
+        self.retry_after = retry_after
+
+
+class ModelError(LLMError):
+    """Model not found or not accessible."""
+
+    def __init__(self, provider: str, model: str):
+        super().__init__(
+            message=f"Model '{model}' not available",
+            provider=provider,
+            suggestion="Check model name or your API plan permissions"
+        )
+
+
+class ContextLengthError(LLMError):
+    """Context length exceeded."""
+
+    def __init__(self, provider: str, limit: int = 0):
+        msg = "Context length exceeded"
+        if limit:
+            msg += f" (limit: {limit} tokens)"
+        super().__init__(
+            message=msg,
+            provider=provider,
+            suggestion="Reduce message history or use a model with larger context"
+        )
+
+
+class ResponseParseError(LLMError):
+    """Failed to parse API response."""
+
+    def __init__(self, provider: str, details: str = ""):
+        super().__init__(
+            message=f"Failed to parse response: {details}" if details else "Failed to parse response",
+            provider=provider,
+            suggestion="This may be a temporary API issue - try again"
+        )
 
 
 @dataclass
@@ -45,7 +139,17 @@ class ToolResult:
 
 
 class LLMProvider(ABC):
-    """Abstract base class for LLM providers."""
+    """Abstract base class for LLM providers.
+
+    Attributes:
+        debug: Enable debug logging of requests/responses.
+        max_retries: Maximum retry attempts for transient failures.
+        retry_delay: Base delay between retries (exponential backoff).
+    """
+
+    debug: bool = False
+    max_retries: int = 3
+    retry_delay: float = 1.0
 
     @abstractmethod
     def chat(
@@ -94,6 +198,77 @@ class LLMProvider(ABC):
     def is_available(self) -> bool:
         """Check if the provider is available (API key set, etc.)."""
         pass
+
+    def test_connection(self) -> tuple[bool, str]:
+        """Test if the API connection actually works.
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if not self.is_available():
+            return False, "Provider not configured (missing API key?)"
+
+        try:
+            # Send minimal test message
+            response = self.chat(
+                messages=[Message(role="user", content="Hi")],
+                system="Respond with just 'ok'."
+            )
+            if response.stop_reason == "error":
+                return False, response.content
+            return True, "Connection successful"
+        except LLMError as e:
+            return False, str(e)
+        except Exception as e:
+            return False, f"Connection test failed: {e}"
+
+    def _log_debug(self, label: str, data: any) -> None:
+        """Log debug information if debug mode is enabled."""
+        if self.debug:
+            import json
+            try:
+                formatted = json.dumps(data, indent=2, default=str)
+            except:
+                formatted = str(data)
+            print(f"\033[90m[DEBUG {label}]\n{formatted}\033[0m")
+
+    def _retry_with_backoff(self, func, *args, **kwargs):
+        """Execute function with exponential backoff retry.
+
+        Args:
+            func: Function to execute.
+            *args, **kwargs: Arguments to pass to function.
+
+        Returns:
+            Function result.
+
+        Raises:
+            Last exception if all retries fail.
+        """
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                return func(*args, **kwargs)
+            except RateLimitError as e:
+                last_error = e
+                wait_time = e.retry_after if e.retry_after else (self.retry_delay * (2 ** attempt))
+                if attempt < self.max_retries - 1:
+                    if self.debug:
+                        print(f"\033[33m[Retry] Rate limited, waiting {wait_time}s...\033[0m")
+                    time.sleep(wait_time)
+            except (ConnectionError,) as e:
+                last_error = e
+                wait_time = self.retry_delay * (2 ** attempt)
+                if attempt < self.max_retries - 1:
+                    if self.debug:
+                        print(f"\033[33m[Retry] Connection error, waiting {wait_time}s...\033[0m")
+                    time.sleep(wait_time)
+            except LLMError:
+                raise  # Don't retry other LLM errors
+            except Exception as e:
+                raise  # Don't retry unknown errors
+
+        raise last_error
 
 
 class MockLLMProvider(LLMProvider):

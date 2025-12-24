@@ -5,6 +5,9 @@ from pathlib import Path
 
 from opencode.tools.base import Tool, ToolResult
 
+# Max lines to include in LLM output (to avoid context explosion)
+MAX_LLM_LINES = 500
+
 
 def generate_unified_diff(old_content: str, new_content: str, path: str) -> str:
     """Generate a git-style unified diff between old and new content."""
@@ -86,25 +89,72 @@ class WriteTool(Tool):
             # Write file (UTF-8 for cross-platform Unicode support)
             file_path.write_text(content, encoding='utf-8')
 
+            # Build numbered file content for LLM (with truncation for large files)
+            lines = content.splitlines()
+
+            if len(lines) <= MAX_LLM_LINES:
+                numbered_content = "\n".join(
+                    f"{i+1:4d}| {line}" for i, line in enumerate(lines)
+                )
+                truncation_note = ""
+            else:
+                # Truncate large files - show beginning and end
+                head_lines = MAX_LLM_LINES // 2
+                tail_lines = MAX_LLM_LINES // 2
+                head = "\n".join(
+                    f"{i+1:4d}| {line}" for i, line in enumerate(lines[:head_lines])
+                )
+                tail = "\n".join(
+                    f"{i+1:4d}| {line}" for i, line in enumerate(lines[-tail_lines:], start=len(lines)-tail_lines)
+                )
+                numbered_content = f"{head}\n...\n[{len(lines) - MAX_LLM_LINES} lines omitted]\n...\n{tail}"
+                truncation_note = f" [TRUNCATED: Showing first {head_lines} and last {tail_lines} of {len(lines)} lines]"
+
             # Show output based on create vs overwrite
             if is_new:
                 print(f"\033[32m+ Creating {path}\033[0m")
-                # Show preview of new content
-                lines = content.splitlines()
+                # Show preview of new content for display
                 preview_lines = min(5, len(lines))
                 preview = "\n".join(f"  {line}" for line in lines[:preview_lines])
                 if len(lines) > preview_lines:
                     preview += f"\n  ... ({len(lines) - preview_lines} more lines)"
-                return ToolResult.ok(f"Created {path} ({len(content)} bytes)\n\n{preview}")
+
+                display_output = f"Created {path} ({len(content)} bytes)\n\n{preview}"
+                llm_output = (
+                    f"Created {path} ({len(content)} bytes)\n\n"
+                    f"[CURRENT FILE STATE]\n"
+                    f"Path: {path}\n"
+                    f"Total lines: {len(lines)}{truncation_note}\n"
+                    f"```\n{numbered_content}\n```"
+                )
+                return ToolResult(
+                    success=True,
+                    output=display_output,
+                    _llm_output=llm_output
+                )
             else:
                 print(f"\033[33m~ Overwriting {path}\033[0m")
                 # Show git-style diff
                 diff_output = generate_unified_diff(old_content, content, path)
                 if diff_output:
                     print(diff_output)
-                    return ToolResult.ok(f"Overwrote {path} ({len(content)} bytes)\n\n{diff_output}")
+                    display_output = f"Overwrote {path} ({len(content)} bytes)\n\n{diff_output}"
                 else:
-                    return ToolResult.ok(f"Overwrote {path} ({len(content)} bytes, no changes)")
+                    display_output = f"Overwrote {path} ({len(content)} bytes, no changes)"
+
+                llm_output = (
+                    f"Overwrote {path} ({len(content)} bytes)\n\n"
+                    f"[DIFF]\n{diff_output if diff_output else '(no changes)'}\n\n"
+                    f"[CURRENT FILE STATE after write]\n"
+                    f"Path: {path}\n"
+                    f"Total lines: {len(lines)}{truncation_note}\n"
+                    f"```\n{numbered_content}\n```"
+                )
+                return ToolResult(
+                    success=True,
+                    output=display_output,
+                    _llm_output=llm_output
+                )
 
         except Exception as e:
             return ToolResult.fail(str(e))

@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "opencode-py"
+name = "opencode"
 version = "0.2.0"
 description = "A local-first coding agent CLI with chat interface"
 requires-python = ">=3.10"
@@ -16,13 +16,37 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.18.0"]
 openai = ["openai>=1.0.0"]
+
+# Document reading support
+excel = ["openpyxl>=3.0.0"]
+excel-legacy = ["xlrd>=2.0.0"]  # For .xls files
+word = ["python-docx>=0.8.0"]
+pdf = ["pypdf>=3.0.0"]
+
+# Combined document support
+docs = [
+    "openpyxl>=3.0.0",
+    "python-docx>=0.8.0",
+    "pypdf>=3.0.0",
+]
+
+# Full installation with all features
 all = [
     "anthropic>=0.18.0",
     "openai>=1.0.0",
+    "openpyxl>=3.0.0",
+    "python-docx>=0.8.0",
+    "pypdf>=3.0.0",
 ]
+
 dev = [
     "pytest>=7.0",
     "pytest-cov",
+    "pytest-asyncio",
+    "pytest-xdist",
+    "openpyxl>=3.0.0",
+    "python-docx>=0.8.0",
+    "pypdf>=3.0.0",
 ]
 
 [project.scripts]

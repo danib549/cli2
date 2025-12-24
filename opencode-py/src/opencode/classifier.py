@@ -73,6 +73,7 @@ class Classifier:
         "for", "with", "to", "from", "in", "on", "at", "by", "about",
         # Pronouns
         "i", "me", "my", "we", "us", "our", "you", "your",
+        "it", "its", "them", "they", "their", "this", "that", "these", "those",
         # Common verbs that suggest requests
         "please", "can", "could", "would", "should", "want", "need",
         "help", "show", "explain", "tell", "give", "create", "build",

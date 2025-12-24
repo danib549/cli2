@@ -4,7 +4,11 @@ import json
 import sys
 from typing import Optional, Generator
 
-from opencode.llm.base import LLMProvider, LLMResponse, Message, ToolCall, ToolResult
+from opencode.llm.base import (
+    LLMProvider, LLMResponse, Message, ToolCall, ToolResult,
+    LLMError, APIKeyError, ConnectionError, RateLimitError,
+    ModelError, ContextLengthError, ResponseParseError
+)
 
 try:
     import anthropic
@@ -13,25 +17,82 @@ except ImportError:
     HAS_ANTHROPIC = False
 
 
+def _parse_anthropic_error(e: Exception, model: str = "") -> LLMError:
+    """Convert Anthropic exceptions to structured LLMError."""
+    error_str = str(e).lower()
+
+    if isinstance(e, anthropic.AuthenticationError):
+        return APIKeyError("Anthropic")
+
+    if isinstance(e, anthropic.RateLimitError):
+        # Try to extract retry-after
+        retry_after = 0
+        if hasattr(e, 'response') and e.response:
+            retry_after = int(e.response.headers.get('retry-after', 0))
+        return RateLimitError("Anthropic", retry_after)
+
+    if isinstance(e, anthropic.NotFoundError):
+        return ModelError("Anthropic", model)
+
+    if isinstance(e, anthropic.BadRequestError):
+        if "context length" in error_str or "too long" in error_str:
+            return ContextLengthError("Anthropic")
+        return LLMError(str(e), "Anthropic", "Check your request format")
+
+    if isinstance(e, anthropic.APIConnectionError):
+        return ConnectionError("Anthropic", str(e))
+
+    if isinstance(e, anthropic.APIError):
+        return LLMError(str(e), "Anthropic")
+
+    return LLMError(str(e), "Anthropic")
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude LLM provider."""
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-sonnet-4-20250514",
+        debug: bool = False,
+        ssl_verify: bool | str = True,
+    ):
         """Initialize the Anthropic provider.
 
         Args:
             api_key: Anthropic API key.
             model: Model to use (default: claude-sonnet-4-20250514).
+            debug: Enable debug logging.
+            ssl_verify: SSL verification (True, False, or path to CA bundle).
         """
         self.api_key = api_key
         self.model = model
+        self.debug = debug
+        self.ssl_verify = ssl_verify
         self._client = None
 
     @property
     def client(self):
         """Lazy-load the Anthropic client."""
         if self._client is None and HAS_ANTHROPIC and self.api_key:
-            self._client = anthropic.Anthropic(api_key=self.api_key)
+            import httpx
+
+            # Configure SSL
+            if self.ssl_verify is False:
+                http_client = httpx.Client(verify=False)
+            elif isinstance(self.ssl_verify, str):
+                http_client = httpx.Client(verify=self.ssl_verify)
+            else:
+                http_client = None  # Use default
+
+            if http_client:
+                self._client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    http_client=http_client
+                )
+            else:
+                self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
 
     def is_available(self) -> bool:
@@ -84,18 +145,35 @@ class AnthropicProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
 
+        # Debug logging
+        self._log_debug("REQUEST", {
+            "model": self.model,
+            "messages": len(anthropic_messages),
+            "tools": len(tools) if tools else 0,
+            "system": system[:100] + "..." if system and len(system) > 100 else system
+        })
+
         try:
             response = self.client.messages.create(**kwargs)
-            return self._parse_response(response)
+            result = self._parse_response(response)
+
+            self._log_debug("RESPONSE", {
+                "content_length": len(result.content),
+                "tool_calls": len(result.tool_calls),
+                "stop_reason": result.stop_reason
+            })
+
+            return result
 
         except anthropic.APIError as e:
+            error = _parse_anthropic_error(e, self.model)
             return LLMResponse(
-                content=f"[API Error] {str(e)}",
+                content=f"[Error] {error.format_message()}",
                 stop_reason="error"
             )
         except Exception as e:
             return LLMResponse(
-                content=f"[Error] {str(e)}",
+                content=f"[Error] Unexpected: {str(e)}",
                 stop_reason="error"
             )
 

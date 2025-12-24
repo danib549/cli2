@@ -131,13 +131,27 @@ class ToolRegistry:
 
         return count
 
-    def get_anthropic_tools(self) -> list[dict]:
-        """Get all tools in Anthropic format."""
-        return [tool.to_anthropic_tool() for tool in self._tools.values()]
+    def get_anthropic_tools(self, read_only: bool = False) -> list[dict]:
+        """Get tools in Anthropic format.
 
-    def get_openai_tools(self) -> list[dict]:
-        """Get all tools in OpenAI format."""
-        return [tool.to_openai_tool() for tool in self._tools.values()]
+        Args:
+            read_only: If True, only return read-only tools (requires_build_mode=False)
+        """
+        tools = self._tools.values()
+        if read_only:
+            tools = [t for t in tools if not t.requires_build_mode]
+        return [tool.to_anthropic_tool() for tool in tools]
+
+    def get_openai_tools(self, read_only: bool = False) -> list[dict]:
+        """Get tools in OpenAI format.
+
+        Args:
+            read_only: If True, only return read-only tools (requires_build_mode=False)
+        """
+        tools = self._tools.values()
+        if read_only:
+            tools = [t for t in tools if not t.requires_build_mode]
+        return [tool.to_openai_tool() for tool in tools]
 
     def get_tool_descriptions(self) -> str:
         """Get formatted tool descriptions for system prompt."""

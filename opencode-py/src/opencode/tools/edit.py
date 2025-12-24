@@ -4,6 +4,9 @@ from pathlib import Path
 
 from opencode.tools.base import Tool, ToolResult
 
+# Max lines to include in LLM output (to avoid context explosion)
+MAX_LLM_LINES = 500
+
 
 def generate_diff(old_string: str, new_string: str, path: str) -> str:
     """Generate a git-style diff display."""
@@ -90,8 +93,55 @@ class EditTool(Tool):
             new_content = content.replace(old_string, new_string, 1)
             file_path.write_text(new_content, encoding='utf-8')
 
-            # Return with diff output
-            return ToolResult.ok(f"Edited {path}\n\n{diff}")
+            # Display output shows diff, LLM output includes full new content
+            display_output = f"Edited {path}\n\n{diff}"
+
+            # Build LLM output with current file state
+            lines = new_content.splitlines()
+
+            # Find the edit location to provide context around it
+            edit_start = new_content.find(new_string)
+            edit_line = new_content[:edit_start].count('\n') if edit_start >= 0 else 0
+
+            if len(lines) <= MAX_LLM_LINES:
+                # Small file - include everything
+                numbered_content = "\n".join(
+                    f"{i+1:4d}| {line}" for i, line in enumerate(lines)
+                )
+                truncation_note = ""
+            else:
+                # Large file - show context around the edit
+                context_before = MAX_LLM_LINES // 3
+                context_after = MAX_LLM_LINES // 3
+                start_line = max(0, edit_line - context_before)
+                end_line = min(len(lines), edit_line + context_after)
+
+                # Ensure we don't exceed MAX_LLM_LINES
+                if end_line - start_line > MAX_LLM_LINES:
+                    end_line = start_line + MAX_LLM_LINES
+
+                numbered_content = "\n".join(
+                    f"{i+1:4d}| {line}" for i, line in enumerate(lines[start_line:end_line], start=start_line)
+                )
+                truncation_note = (
+                    f"\n[TRUNCATED: Showing lines {start_line+1}-{end_line} of {len(lines)} "
+                    f"(around edit at line {edit_line+1})]"
+                )
+
+            llm_output = (
+                f"Edited {path}\n\n"
+                f"[DIFF]\n{diff}\n\n"
+                f"[CURRENT FILE STATE after edit]\n"
+                f"Path: {path}\n"
+                f"Total lines: {len(lines)}{truncation_note}\n"
+                f"```\n{numbered_content}\n```"
+            )
+
+            return ToolResult(
+                success=True,
+                output=display_output,
+                _llm_output=llm_output
+            )
 
         except Exception as e:
             return ToolResult.fail(str(e))

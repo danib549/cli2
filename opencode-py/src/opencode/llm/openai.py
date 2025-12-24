@@ -3,13 +3,45 @@
 import sys
 from typing import Optional
 
-from opencode.llm.base import LLMProvider, LLMResponse, Message, ToolCall, ToolResult
+from opencode.llm.base import (
+    LLMProvider, LLMResponse, Message, ToolCall, ToolResult,
+    LLMError, APIKeyError, ConnectionError, RateLimitError,
+    ModelError, ContextLengthError
+)
 
 try:
     import openai
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
+
+
+def _parse_openai_error(e: Exception, model: str = "") -> LLMError:
+    """Convert OpenAI exceptions to structured LLMError."""
+    error_str = str(e).lower()
+
+    if HAS_OPENAI:
+        if isinstance(e, openai.AuthenticationError):
+            return APIKeyError("OpenAI")
+
+        if isinstance(e, openai.RateLimitError):
+            return RateLimitError("OpenAI")
+
+        if isinstance(e, openai.NotFoundError):
+            return ModelError("OpenAI", model)
+
+        if isinstance(e, openai.BadRequestError):
+            if "context_length" in error_str or "maximum context" in error_str:
+                return ContextLengthError("OpenAI")
+            return LLMError(str(e), "OpenAI", "Check your request format")
+
+        if isinstance(e, openai.APIConnectionError):
+            return ConnectionError("OpenAI", str(e))
+
+        if isinstance(e, openai.APIError):
+            return LLMError(str(e), "OpenAI")
+
+    return LLMError(str(e), "OpenAI")
 
 
 class OpenAIProvider(LLMProvider):
@@ -24,6 +56,8 @@ class OpenAIProvider(LLMProvider):
         api_key: str,
         model: str = "gpt-4",
         base_url: Optional[str] = None,
+        debug: bool = False,
+        ssl_verify: bool | str = True,
     ):
         """Initialize the OpenAI provider.
 
@@ -31,19 +65,32 @@ class OpenAIProvider(LLMProvider):
             api_key: OpenAI API key.
             model: Any OpenAI model name (no restrictions).
             base_url: Optional custom base URL (for Azure, proxies, etc.)
+            debug: Enable debug logging.
+            ssl_verify: SSL verification (True, False, or path to CA bundle).
         """
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
+        self.debug = debug
+        self.ssl_verify = ssl_verify
         self._client = None
 
     @property
     def client(self):
         """Lazy-load the OpenAI client."""
         if self._client is None and HAS_OPENAI and self.api_key:
+            import httpx
+
             kwargs = {"api_key": self.api_key}
             if self.base_url:
                 kwargs["base_url"] = self.base_url
+
+            # Configure SSL
+            if self.ssl_verify is False:
+                kwargs["http_client"] = httpx.Client(verify=False)
+            elif isinstance(self.ssl_verify, str):
+                kwargs["http_client"] = httpx.Client(verify=self.ssl_verify)
+
             self._client = openai.OpenAI(**kwargs)
         return self._client
 
@@ -101,18 +148,34 @@ class OpenAIProvider(LLMProvider):
             if openai_tools:
                 kwargs["tools"] = openai_tools
 
+        # Debug logging
+        self._log_debug("REQUEST", {
+            "model": self.model,
+            "messages": len(openai_messages),
+            "tools": len(kwargs.get("tools", [])),
+        })
+
         try:
             response = self.client.chat.completions.create(**kwargs)
-            return self._parse_response(response)
+            result = self._parse_response(response)
+
+            self._log_debug("RESPONSE", {
+                "content_length": len(result.content),
+                "tool_calls": len(result.tool_calls),
+                "stop_reason": result.stop_reason
+            })
+
+            return result
 
         except openai.APIError as e:
+            error = _parse_openai_error(e, self.model)
             return LLMResponse(
-                content=f"[API Error] {str(e)}",
+                content=f"[Error] {error.format_message()}",
                 stop_reason="error"
             )
         except Exception as e:
             return LLMResponse(
-                content=f"[Error] {str(e)}",
+                content=f"[Error] Unexpected: {str(e)}",
                 stop_reason="error"
             )
 
@@ -505,6 +568,7 @@ class CustomLLMProvider(LLMProvider):
         base_url: str,
         model: str,
         api_key: str = "not-needed",  # Some local servers don't need a key
+        debug: bool = False,
     ):
         """Initialize custom LLM provider.
 
@@ -512,10 +576,12 @@ class CustomLLMProvider(LLMProvider):
             base_url: The API base URL (e.g., http://localhost:11434/v1)
             model: Model name to use
             api_key: API key (use "not-needed" for local servers)
+            debug: Enable debug logging.
         """
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
+        self.debug = debug
         self._client = None
 
     @property
