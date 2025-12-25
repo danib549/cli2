@@ -553,6 +553,139 @@ class OpenAIProvider(LLMProvider):
             )
 
 
+def _parse_text_tool_calls(content: str, available_tools: list[str] = None) -> tuple[str, list]:
+    """Parse tool calls from text output for models without native function calling.
+
+    Supports formats:
+    - [tool_name(arg1, arg2)]
+    - [tool_name("arg1", key="value")]
+    - tool_name(path="value")
+    - ```tool_name(...)```
+
+    Returns:
+        Tuple of (cleaned_content, list of ToolCall objects)
+    """
+    import re
+    import uuid
+
+    tool_calls = []
+
+    # Known tool names if not provided
+    if available_tools is None:
+        available_tools = [
+            "read", "write", "edit", "bash", "glob", "grep",
+            "tree", "outline", "find_definition", "find_references",
+            "find_symbols", "rename_symbol"
+        ]
+
+    # Pattern to match tool calls: [tool(...)] or tool(...)
+    # Handles nested parentheses and quoted strings
+    tool_pattern = r'\[?(' + '|'.join(available_tools) + r')\s*\(((?:[^()]*|\([^()]*\))*)\)\]?'
+
+    matches = list(re.finditer(tool_pattern, content, re.IGNORECASE))
+
+    if not matches:
+        return content, []
+
+    for match in matches:
+        tool_name = match.group(1).lower()
+        args_str = match.group(2).strip()
+
+        # Parse arguments
+        arguments = {}
+
+        if args_str:
+            # Try to parse as key=value pairs first
+            kv_pattern = r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^,\s\)]+))'
+            kv_matches = re.findall(kv_pattern, args_str)
+
+            if kv_matches:
+                for kv in kv_matches:
+                    key = kv[0]
+                    # Get the non-empty value from the groups
+                    value = kv[1] or kv[2] or kv[3]
+                    arguments[key] = value
+            else:
+                # Try positional arguments - map to common parameter names
+                # Remove quotes and split by comma
+                pos_args = []
+                current_arg = ""
+                in_quotes = False
+                quote_char = None
+
+                for char in args_str:
+                    if char in '"\'':
+                        if not in_quotes:
+                            in_quotes = True
+                            quote_char = char
+                        elif char == quote_char:
+                            in_quotes = False
+                            quote_char = None
+                        else:
+                            current_arg += char
+                    elif char == ',' and not in_quotes:
+                        if current_arg.strip():
+                            pos_args.append(current_arg.strip())
+                        current_arg = ""
+                    else:
+                        current_arg += char
+
+                if current_arg.strip():
+                    pos_args.append(current_arg.strip())
+
+                # Map positional args to parameter names based on tool
+                if tool_name == "read" and pos_args:
+                    arguments["path"] = pos_args[0]
+                elif tool_name == "write" and pos_args:
+                    arguments["path"] = pos_args[0]
+                    if len(pos_args) > 1:
+                        arguments["content"] = pos_args[1]
+                elif tool_name == "edit" and pos_args:
+                    arguments["path"] = pos_args[0]
+                    if len(pos_args) > 1:
+                        arguments["old_string"] = pos_args[1]
+                    if len(pos_args) > 2:
+                        arguments["new_string"] = pos_args[2]
+                elif tool_name == "bash" and pos_args:
+                    arguments["command"] = pos_args[0]
+                elif tool_name == "glob" and pos_args:
+                    arguments["pattern"] = pos_args[0]
+                elif tool_name == "grep" and pos_args:
+                    arguments["pattern"] = pos_args[0]
+                    if len(pos_args) > 1:
+                        arguments["path"] = pos_args[1]
+                elif tool_name == "tree" and pos_args:
+                    arguments["path"] = pos_args[0]
+                    if len(pos_args) > 1:
+                        try:
+                            arguments["depth"] = int(pos_args[1])
+                        except ValueError:
+                            pass
+                elif tool_name in ("find_definition", "find_references", "find_symbols") and pos_args:
+                    arguments["symbol"] = pos_args[0] if tool_name != "find_symbols" else pos_args[0]
+                    if tool_name == "find_symbols":
+                        arguments["query"] = pos_args[0]
+                elif tool_name == "outline" and pos_args:
+                    arguments["path"] = pos_args[0]
+
+        # Create tool call
+        tool_calls.append(ToolCall(
+            id=f"text_call_{uuid.uuid4().hex[:8]}",
+            name=tool_name,
+            arguments=arguments
+        ))
+
+    # Remove tool calls from content to get clean text
+    cleaned_content = content
+    for match in reversed(matches):  # Reverse to preserve indices
+        cleaned_content = cleaned_content[:match.start()] + cleaned_content[match.end():]
+
+    # Clean up extra whitespace
+    cleaned_content = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_content).strip()
+
+    return cleaned_content, tool_calls
+
+
 class CustomLLMProvider(LLMProvider):
     """Custom LLM provider for any OpenAI-compatible API.
 
@@ -561,6 +694,9 @@ class CustomLLMProvider(LLMProvider):
     - LM Studio (http://localhost:1234/v1)
     - vLLM, text-generation-inference
     - Any OpenAI-compatible endpoint
+
+    Includes text-based tool call parsing for models without native function calling
+    (e.g., Gemma, LLaMA, Mistral via Ollama).
     """
 
     def __init__(
@@ -569,6 +705,7 @@ class CustomLLMProvider(LLMProvider):
         model: str,
         api_key: str = "not-needed",  # Some local servers don't need a key
         debug: bool = False,
+        parse_text_tools: bool = True,  # Enable text-based tool parsing
     ):
         """Initialize custom LLM provider.
 
@@ -577,11 +714,13 @@ class CustomLLMProvider(LLMProvider):
             model: Model name to use
             api_key: API key (use "not-needed" for local servers)
             debug: Enable debug logging.
+            parse_text_tools: Parse tool calls from text for models without native function calling.
         """
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
         self.debug = debug
+        self.parse_text_tools = parse_text_tools
         self._client = None
 
     @property
@@ -686,13 +825,18 @@ class CustomLLMProvider(LLMProvider):
         return openai_tools
 
     def _parse_response(self, response) -> LLMResponse:
-        """Parse response into LLMResponse."""
+        """Parse response into LLMResponse.
+
+        If the model doesn't support native function calling, attempts to parse
+        tool calls from the text content (e.g., [read(path)] or bash(command)).
+        """
         choice = response.choices[0]
         message = choice.message
 
         content = message.content or ""
         tool_calls = []
 
+        # First try native tool calls
         if hasattr(message, 'tool_calls') and message.tool_calls:
             import json
             for tc in message.tool_calls:
@@ -705,6 +849,15 @@ class CustomLLMProvider(LLMProvider):
                     name=tc.function.name,
                     arguments=args
                 ))
+
+        # If no native tool calls and text parsing is enabled, try parsing from text
+        if not tool_calls and self.parse_text_tools and content:
+            cleaned_content, text_tool_calls = _parse_text_tool_calls(content)
+            if text_tool_calls:
+                content = cleaned_content
+                tool_calls = text_tool_calls
+                if self.debug:
+                    print(f"[DEBUG] Parsed {len(text_tool_calls)} tool call(s) from text")
 
         return LLMResponse(
             content=content,
@@ -897,8 +1050,18 @@ class CustomLLMProvider(LLMProvider):
                     arguments=args
                 ))
 
+            # If no native tool calls, try parsing from text
+            final_content = "".join(collected_content)
+            if not tool_calls_result and self.parse_text_tools and final_content:
+                cleaned_content, text_tool_calls = _parse_text_tool_calls(final_content)
+                if text_tool_calls:
+                    final_content = cleaned_content
+                    tool_calls_result = text_tool_calls
+                    if self.debug:
+                        print(f"[DEBUG] Parsed {len(text_tool_calls)} tool call(s) from streamed text")
+
             return LLMResponse(
-                content="".join(collected_content),
+                content=final_content,
                 tool_calls=tool_calls_result,
                 stop_reason="stop"
             )
@@ -1037,8 +1200,18 @@ class CustomLLMProvider(LLMProvider):
                     arguments=args
                 ))
 
+            # If no native tool calls, try parsing from text
+            final_content = "".join(collected_content)
+            if not tool_calls_result and self.parse_text_tools and final_content:
+                cleaned_content, text_tool_calls = _parse_text_tool_calls(final_content)
+                if text_tool_calls:
+                    final_content = cleaned_content
+                    tool_calls_result = text_tool_calls
+                    if self.debug:
+                        print(f"[DEBUG] Parsed {len(text_tool_calls)} tool call(s) from streamed text")
+
             return LLMResponse(
-                content="".join(collected_content),
+                content=final_content,
                 tool_calls=tool_calls_result,
                 stop_reason="stop"
             )
